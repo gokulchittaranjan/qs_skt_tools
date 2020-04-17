@@ -1,0 +1,20 @@
+#!/bin/bash
+
+echo "Please wait... Installing Tesseract and associated training data..."
+sudo dnf install python-tkinter tesseract
+sudo dnf install snapd
+sudo ln -s /var/lib/snapd/snap /snap
+sudo snap install pdftk
+# By default installing kannada, telugu, english, and sanskrit models
+wget https://github.com/tesseract-ocr/tessdata_best/raw/master/kan.traineddata
+wget https://github.com/tesseract-ocr/tessdata_best/raw/master/tel.traineddata
+wget https://github.com/tesseract-ocr/tessdata_best/raw/master/san.traineddata
+wget https://github.com/tesseract-ocr/tessdata_best/raw/master/eng.traineddata
+sudo cp *traineddata /usr/share/tesseract-ocr/4.00/tessdata
+sudo cp *traineddata /usr/share/tesseract/4.00/tessdata
+sudo cp *traineddata /usr/share/tesseract-ocr/4.10/tessdata
+sudo cp *traineddata /usr/share/tesseract/4.10/tessdata
+sudo cp *traineddata /usr/share/tesseract/tessdata
+rm *traineddata
+
+echo "INSTALLATION DONE!"

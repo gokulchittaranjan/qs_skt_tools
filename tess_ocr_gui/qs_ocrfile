@@ -1,0 +1,150 @@
+#!/usr/bin/python
+
+import sys
+import codecs
+import uuid
+from subprocess import Popen, check_output
+import os
+from shutil import copy, rmtree
+import tempfile
+import glob
+
+if sys.version_info[0] < 3:
+    from Tkinter import *
+    import ttk
+    import tkMessageBox as messagebox
+    import tkFileDialog as filedialog
+else:
+    from tkinter import *
+    from tkinter import ttk
+    from tkinter import messagebox
+    from tkinter import filedialog
+
+
+def fileDialog(self):
+
+    self.filename = filedialog.askopenfilename(initialdir=os.getcwd(),
+                                               title="Select A File to OCR",
+                                               filetype=(("jpeg files", "*.jpg"),
+                                                         ("png files", "*.png"),
+                                                         ("pdf files", "*.pdf")))
+    self.label = ttk.Label(self.labelFrame, text="")
+    self.label.grid(column=1, row=2)
+    self.label.configure(text=self.filename)
+
+
+class Root(Tk):
+    def __init__(self):
+        Tk.__init__(self)
+        self.title("QuaintScienceTools::OCR files using Tesseract")
+        self.minsize(200, 200)
+        # self.wm_iconbitmap('icon.ico')
+        self.labelFrame = ttk.LabelFrame(self, text="Open File to OCR")
+        self.labelFrame.grid(column=0, row=1, padx=20, pady=20)
+
+        self.select_file_button()
+        self.language_dropdown()
+        self.ocr_button()
+
+    def select_file_button(self):
+        self.select_file_button = ttk.Button(self.labelFrame,
+                                             text="Browse A File to OCR",
+                                             command=self.select_file_dialog)
+        self.select_file_button.grid(column=1, row=1)
+
+    def ocr_button(self):
+        self.ocr_button = ttk.Button(self.labelFrame,
+                                     text="OCR the document!",
+                                     command=self.ocr_the_doc)
+        self.ocr_button.grid(column=1, row=4)
+
+    def language_dropdown(self):
+        # Create a Tkinter variable
+        self.tkvar = StringVar(self)
+        tkvar = self.tkvar
+
+        # Dictionary with options
+        langs = check_output(["tesseract", "--list-langs"])
+        langs = filter(None, str(langs).split("\n")[1:])
+        choices = set(langs)
+        tkvar.set(langs[0])  # set the default option
+        self.language = 'tel'
+
+        popupMenu = OptionMenu(self.labelFrame, tkvar, *choices)
+        popupMenu.grid(row=3, column=1)
+
+        # on change dropdown value
+        def change_dropdown(*args):
+            self.language = str(tkvar.get())
+
+    def select_file_dialog(self):
+        self.filename = filedialog.askopenfilename(initialdir=os.getcwd(),
+                                                   title="Select A File to OCR",
+                                                   filetypes=(("pdf files", "*.pdf"),
+                                                              ("jpeg files", "*.jpg"),
+                                                              ("png files", "*.png")))
+        self.label = ttk.Label(self.labelFrame, text="")
+        self.label.grid(column=1, row=2)
+        self.label.configure(text=self.filename)
+
+    def ocr(self, f):
+        outputfilename = f + ".ocr.txt"
+        cmd = ["tesseract",
+               f,
+               outputfilename,
+               "-l", str(self.language),
+               "--oem", "1"]
+        print(cmd)
+        Popen(cmd).wait()
+        return outputfilename
+
+    def to_png(self, f):
+        output_filename = f + ".png"
+        cmd = ["convert",
+               f,
+               output_filename]
+        Popen(cmd).wait()
+        return output_filename
+
+    def ocr_the_doc(self):
+        self.switch(self.ocr_button)
+        filename = str(self.filename)
+        output_filename = filename + ".ocr.txt"
+        if filename.endswith("pdf"):
+            Popen("rm QS_TEMP*", shell=True).wait()
+            output_pattern = "QS_TEMP_%04d.pdf"
+            Popen("pdftk {} burst output {}".format(filename, output_pattern),
+                  shell=True).wait()
+            for f in glob.glob("./QS_TEMP_*.pdf"):
+                fname = self.to_png(f)
+                self.ocr(fname)
+            all_data = []
+            for f in sorted(glob.glob("./QS_TEMP_*.ocr.txt*")):
+                with codecs.open(f, encoding='utf-8') as d:
+                    all_data.append((f, d.read()))
+            # Popen("rm QS_TEMP*", shell=True).wait()
+            with codecs.open(output_filename, 'w', encoding='utf-8') as f:
+                for tmp_file, item in all_data:
+                    page_number = tmp_file.replace("./QS_TEMP_", "").replace(".pdf", "")
+                    page_number = page_number.split(".")[0]
+                    f.write("========= PAGE {} =========".format(page_number))
+                    f.write(item)
+        elif filename.endswith("jpg") or filename.endswith("jpeg"):
+            fname = self.to_png(f)
+            output_filename = self.ocr(fname)
+        else:
+            output_filename = self.ocr(filename)
+        messagebox.showinfo("QuaintScienceTools",
+                            "Done OCRing file. It is stored at {}".format(output_filename))
+        self.switch(self.ocr_button)
+
+    def switch(self, button):
+        if str(button["state"]) == NORMAL:
+            button["state"] = DISABLED
+        else:
+            button["state"] = NORMAL
+        print(button["state"])
+
+
+root = Root()
+root.mainloop()
