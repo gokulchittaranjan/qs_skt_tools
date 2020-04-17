@@ -100,10 +100,8 @@ class Root(Tk):
 
     def to_png(self, f):
         output_filename = f + ".png"
-        cmd = ["convert",
-               f,
-               output_filename]
-        Popen(cmd).wait()
+        cmd = "convert -density 300 {} -quality 100 {}".format(f, output_filename)
+        Popen(cmd, shell=True).wait()
         return output_filename
 
     def ocr_the_doc(self):
