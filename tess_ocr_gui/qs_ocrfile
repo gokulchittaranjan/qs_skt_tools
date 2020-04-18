@@ -2,11 +2,9 @@
 
 import sys
 import codecs
-import uuid
+import multiprocessing
 from subprocess import Popen, check_output
 import os
-from shutil import copy, rmtree
-import tempfile
 import glob
 
 if sys.version_info[0] < 3:
@@ -19,6 +17,45 @@ else:
     from tkinter import ttk
     from tkinter import messagebox
     from tkinter import filedialog
+
+
+TEMP_FILE_PREFIX = "QS_TEMP_"
+
+
+def exec_command(cmd):
+    print(cmd)
+    if isinstance(cmd, list):
+        Popen(cmd).wait()
+    elif isinstance(cmd, str):
+        Popen(cmd, shell=True).wait()
+
+
+def get_command_output(cmd):
+    return check_output(cmd)
+
+
+def process_pdf_page(arg):
+        img_args, f = arg
+        density, quality = img_args
+        to_png(f, density, quality)
+
+
+def to_png(f, density, quality):
+        output_filename = f + ".png"
+        cmd = "convert -density {} {} -quality {} {}".format(density, f, quality, output_filename)
+        exec_command(cmd)
+        return output_filename
+
+
+def ocr(f, language):
+        outputfilename = f + ".ocr.txt"
+        cmd = ["tesseract",
+               f,
+               outputfilename,
+               "-l", str(language),
+               "--oem", "1"]
+        exec_command(cmd)
+        return outputfilename
 
 
 def fileDialog(self):
@@ -44,6 +81,7 @@ class Root(Tk):
 
         self.select_file_button()
         self.language_dropdown()
+        self.image_settings_inputs()
         self.ocr_button()
 
     def select_file_button(self):
@@ -57,6 +95,23 @@ class Root(Tk):
                                      text="OCR the document!",
                                      command=self.ocr_the_doc)
         self.ocr_button.grid(column=1, row=4)
+        self.pb_value = IntVar(self)
+        self.pb_value.set("")
+        self.progress = ttk.Progressbar(self.labelFrame, orient=HORIZONTAL,
+                                        length=100, mode='determinate', value=0, maximum=100)
+        self.progress.grid(column=0, row=8)
+
+    def image_settings_inputs(self):
+        labelFrame = ttk.Label(self.labelFrame, text="Image Density (JPG/PDF)")
+        labelFrame.grid(column=0, row=6)
+        self.image_density = ttk.Entry(self.labelFrame)
+        self.image_density.grid(column=1, row=6)
+        labelFrame = ttk.Label(self.labelFrame, text="Image Quality (JPG/PDF)")
+        labelFrame.grid(column=0, row=7)
+        self.image_quality = ttk.Entry(self.labelFrame)
+        self.image_quality.grid(column=1, row=7)
+        self.image_density.insert(0, "300")
+        self.image_quality.insert(0, "100")
 
     def language_dropdown(self):
         # Create a Tkinter variable
@@ -64,7 +119,7 @@ class Root(Tk):
         tkvar = self.tkvar
 
         # Dictionary with options
-        langs = check_output(["tesseract", "--list-langs"])
+        langs = get_command_output(["tesseract", "--list-langs"])
         langs = filter(None, str(langs).split("\n")[1:])
         choices = set(langs)
         tkvar.set(langs[0])  # set the default option
@@ -87,45 +142,39 @@ class Root(Tk):
         self.label.grid(column=1, row=2)
         self.label.configure(text=self.filename)
 
-    def ocr(self, f):
-        outputfilename = f + ".ocr.txt"
-        cmd = ["tesseract",
-               f,
-               outputfilename,
-               "-l", str(self.language),
-               "--oem", "1"]
-        print(cmd)
-        Popen(cmd).wait()
-        return outputfilename
-
-    def to_png(self, f):
-        output_filename = f + ".png"
-        cmd = "convert -density 300 {} -quality 100 {}".format(f, output_filename)
-        Popen(cmd, shell=True).wait()
-        return output_filename
-
     def ocr_the_doc(self):
         self.switch(self.ocr_button)
         filename = str(self.filename)
         output_filename = filename + ".ocr.txt"
         if filename.endswith("pdf"):
-            Popen("rm QS_TEMP*", shell=True).wait()
-            output_pattern = "QS_TEMP_%04d.pdf"
-            Popen("pdftk {} burst output {}".format(filename, output_pattern),
-                  shell=True).wait()
-            for f in glob.glob("./QS_TEMP_*.pdf"):
-                fname = self.to_png(f)
-                self.ocr(fname)
+            exec_command("rm {}*".format(TEMP_FILE_PREFIX))
+            output_pattern = "{}%04d.pdf".format(TEMP_FILE_PREFIX)
+            exec_command("pdftk {} burst output {}".format(filename, output_pattern))
+            p = multiprocessing.Pool(5)
+
+            tmp_files = glob.glob("./{}*.pdf".format(TEMP_FILE_PREFIX))
+
+            args = list(zip([[int(self.image_density.get()),
+                             int(self.image_quality.get())]] * len(tmp_files), tmp_files))
+            p.map(process_pdf_page, args)
+            png_files = glob.glob("./{}*.png".format(TEMP_FILE_PREFIX))
+
+            for ii, f in enumerate(png_files):
+                ocr(f, self.language)
+                self.progress["value"] = int((ii + 1) * 100 / (len(png_files) + 1e-9))
+                self.update_idletasks()
+            self.progress["value"] = 100
+            self.update_idletasks()
             all_data = []
-            for f in sorted(glob.glob("./QS_TEMP_*.ocr.txt*")):
+            for f in sorted(glob.glob("./{}*.ocr.txt*".format(TEMP_FILE_PREFIX))):
                 with codecs.open(f, encoding='utf-8') as d:
                     all_data.append((f, d.read()))
             # Popen("rm QS_TEMP*", shell=True).wait()
             with codecs.open(output_filename, 'w', encoding='utf-8') as f:
                 for tmp_file, item in all_data:
-                    page_number = tmp_file.replace("./QS_TEMP_", "").replace(".pdf", "")
+                    page_number = tmp_file.replace("./{}".format(TEMP_FILE_PREFIX), "").replace(".pdf", "")
                     page_number = page_number.split(".")[0]
-                    f.write("========= PAGE {} =========".format(page_number))
+                    f.write("========= PAGE {} =========\n".format(page_number))
                     f.write(item)
         elif filename.endswith("jpg") or filename.endswith("jpeg"):
             fname = self.to_png(f)
