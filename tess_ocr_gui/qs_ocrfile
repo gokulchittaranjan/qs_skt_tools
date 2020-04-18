@@ -5,7 +5,17 @@ import codecs
 import multiprocessing
 from subprocess import Popen, check_output
 import os
+import traceback
 import glob
+
+import cv2
+
+import ctypes
+import ctypes.util
+from threading import Lock
+from wrapt import synchronized
+import locale
+locale.setlocale(locale.LC_ALL, 'C')
 
 if sys.version_info[0] < 3:
     from Tkinter import *
@@ -20,6 +30,146 @@ else:
 
 
 TEMP_FILE_PREFIX = "QS_TEMP_"
+
+native_tesseract_instances = {}
+
+
+class TesseractError(Exception):
+    pass
+
+
+class NativeTesseract:
+
+    _lib = None
+    _api = None
+    lock = Lock()
+
+    class TessBaseAPI(ctypes._Pointer):
+        _type_ = type('_TessBaseAPI', (ctypes.Structure,), {})
+
+    @classmethod
+    def setup_lib(cls, lib_path=None):
+        if cls._lib is not None:
+            return
+        if lib_path is None:
+            path_candidates = ["/lib64/libtesseract.so.4",
+                               "/usr/lib64/libtesseract.so.4",
+                               "/usr/local/lib/libtesseract.so.4",
+                               "/usr/lib/libtesseract.so.4",
+                               "/usr/lib/x86_64-linux-gnu/libtesseract.so.4"]
+            for candidate in path_candidates:
+                if os.path.exists(candidate):
+                    lib_path = candidate
+                    break
+            if lib_path is None:
+                raise IOError("libtesseract.so.4 not found. Searched at {}".format(", ".join(path_candidates)))
+        cls._lib = lib = ctypes.CDLL(lib_path)
+
+        # source:
+        # https://github.com/tesseract-ocr/tesseract/blob/95ea778745edd1cdf6ee22f9fe653b9e061d5708/src/api/capi.h
+
+        lib.TessBaseAPICreate.restype = cls.TessBaseAPI
+
+        lib.TessBaseAPIDelete.restype = None  # void
+        lib.TessBaseAPIDelete.argtypes = (
+            cls.TessBaseAPI,)  # handle
+
+        lib.TessBaseAPIInit3.argtypes = (cls.TessBaseAPI, ctypes.c_char_p, ctypes.c_char_p)
+
+        lib.TessBaseAPISetImage.restype = None
+        lib.TessBaseAPISetImage.argtypes = (cls.TessBaseAPI, ctypes.c_void_p,
+                                            ctypes.c_int, ctypes.c_int,
+                                            ctypes.c_int, ctypes.c_int)
+
+        lib.TessBaseAPISetVariable.argtypes = (cls.TessBaseAPI, ctypes.c_char_p, ctypes.c_char_p)
+
+        lib.TessBaseAPIGetUTF8Text.restype = ctypes.c_char_p
+        lib.TessBaseAPIGetUTF8Text.argtypes = (
+            cls.TessBaseAPI,)
+        lib.TessBaseAPIGetHOCRText.argtypes = [cls.TessBaseAPI, ctypes.c_int]
+        lib.TessBaseAPIGetHOCRText.restype = ctypes.c_char_p
+
+    def __init__(self, language="eng", datapath=None, lib_path=None):
+        if self._lib is None:
+            self.setup_lib(lib_path)
+        self._api = self._lib.TessBaseAPICreate()
+        if self._lib.TessBaseAPIInit3(self._api, datapath, language.encode('ascii')):
+            print("Tesseract initialization failed!!")
+            raise TesseractError('initialization failed')
+
+    def __del__(self):
+        if not self._lib or not self._api:
+            return
+        if not getattr(self, 'closed', False):
+            self._lib.TessBaseAPIDelete(self._api)
+            self.closed = True
+
+    def _check_setup(self):
+        if not self._lib:
+            raise TesseractError('lib not configured')
+        if not self._api:
+            raise TesseractError('api not created')
+
+    def set_image(self, imagedata, width, height,
+                  bytes_per_pixel, bytes_per_line=None):
+        self._check_setup()
+        if bytes_per_line is None:
+            bytes_per_line = width * bytes_per_pixel
+        self._lib.TessBaseAPISetImage(self._api,
+                                      imagedata, width, height,
+                                      bytes_per_pixel, bytes_per_line)
+
+    def set_variable(self, key, val):
+        self._check_setup()
+        self._lib.TessBaseAPISetVariable(self._api, key.encode('ascii'), val.encode('ascii'))
+
+    def get_utf8_text(self):
+        self._check_setup()
+        return self._lib.TessBaseAPIGetUTF8Text(self._api).decode('utf-8')
+
+    def to_grayscale(self, image):
+        if len(image.shape) > 2 and image.shape[2] > 0:
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        return image
+
+    def get_image_dimensions(self, image):
+        if image is None or image.size == 0:
+            return 0, 0
+        if len(image.shape) == 3:
+            height, width, channel = image.shape
+        elif len(image.shape) == 2:
+            height, width = image.shape
+        else:
+            raise ValueError("Not a proper cv2 image!")
+        return width, height
+
+    def read_image(self, image_path):
+        image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+        img_dimensions = image.shape
+
+        if len(img_dimensions) == 3 and img_dimensions[2] == 4:
+            image = cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
+            image = self.to_grayscale(image)
+            width, height = self.get_image_dimensions(image)
+            return image, width, height
+        elif len(img_dimensions) == 2 or (len(img_dimensions) == 3 and img_dimensions[2] == 3):
+            image = self.to_grayscale(image)
+            width, height = self.get_image_dimensions(image)
+            return image, width, height
+        else:
+            raise IOError("Not valid PNG format: {}".format(image_path))
+
+    @synchronized
+    def process(self, image_path, psm=3):
+
+        image, width, height = self.read_image(image_path)
+
+        # self.set_variable("tessedit_char_whitelist", None)
+        self.set_variable("tessedit_pageseg_mode", str(psm))
+        self.set_variable("tessedit_ocr_engine_mode", str(1))
+        self.set_variable("image_resolution", "70")
+        self.set_image(image.ctypes, width, height, 1)
+        return self.get_utf8_text().strip()
 
 
 def exec_command(cmd):
@@ -48,14 +198,21 @@ def to_png(f, density, quality):
 
 
 def ocr(f, language):
-        outputfilename = f + ".ocr.txt"
-        cmd = ["tesseract",
-               f,
-               outputfilename,
-               "-l", str(language),
-               "--oem", "1"]
-        exec_command(cmd)
-        return outputfilename
+    outputfilename = f + ".ocr.txt"
+    cmd = ["tesseract",
+           f,
+           outputfilename,
+           "-l", str(language),
+           "--oem", "1"]
+    exec_command(cmd)
+    return outputfilename
+
+
+def ocr_native(f, language, psm):
+    outputfilename = f + ".ocr.txt"
+    text = native_tesseract_instances[language].process(f, psm)
+    with codecs.open(outputfilename, 'w', encoding='utf-8') as f:
+        f.write(text)
 
 
 def fileDialog(self):
@@ -99,7 +256,15 @@ class Root(Tk):
         self.pb_value.set("")
         self.progress = ttk.Progressbar(self.labelFrame, orient=HORIZONTAL,
                                         length=100, mode='determinate', value=0, maximum=100)
-        self.progress.grid(column=0, row=8)
+
+        self.ocr_backend = IntVar()
+        self.cb = Checkbutton(self.labelFrame,
+                              text="Use Native API Backend",
+                              variable=self.ocr_backend,
+                              onvalue=1,
+                              offvalue=0)
+        self.progress.grid(column=0, row=10)
+        self.cb.grid(column=0, row=9)
 
     def image_settings_inputs(self):
         labelFrame = ttk.Label(self.labelFrame, text="Image Density (JPG/PDF)")
@@ -113,6 +278,12 @@ class Root(Tk):
         self.image_density.insert(0, "300")
         self.image_quality.insert(0, "100")
 
+        labelFrame = ttk.Label(self.labelFrame, text="PSM (Native Backend)")
+        labelFrame.grid(column=0, row=8)
+        self.native_backend = ttk.Entry(self.labelFrame)
+        self.native_backend.grid(column=1, row=8)
+        self.native_backend.insert(0, "3")
+
     def language_dropdown(self):
         # Create a Tkinter variable
         self.tkvar = StringVar(self)
@@ -122,6 +293,12 @@ class Root(Tk):
         langs = get_command_output(["tesseract", "--list-langs"])
         langs = filter(None, str(langs).split("\n")[1:])
         choices = set(langs)
+        for lang in langs:
+            print("initializing {}".format(lang))
+            try:
+                native_tesseract_instances[lang] = NativeTesseract(lang)
+            except Exception:
+                traceback.print_exc()
         tkvar.set(langs[0])  # set the default option
         self.language = 'tel'
 
@@ -160,7 +337,11 @@ class Root(Tk):
             png_files = glob.glob("./{}*.png".format(TEMP_FILE_PREFIX))
 
             for ii, f in enumerate(png_files):
-                ocr(f, self.language)
+                if int(self.ocr_backend.get()) == 1:
+                    print(self.language)
+                    ocr_native(f, self.language, str(self.native_backend.get()))
+                else:
+                    ocr(f, self.language)
                 self.progress["value"] = int((ii + 1) * 100 / (len(png_files) + 1e-9))
                 self.update_idletasks()
             self.progress["value"] = 100
